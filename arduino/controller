@@ -1,0 +1,205 @@
+#include <LiquidCrystal.h>
+
+#define MQ3_PIN A0
+#define FSR1_PIN A1
+#define FSR2_PIN A2
+#define FSR3_PIN A3
+#define FSR4_PIN A4
+
+#define RELAY_PIN 8
+#define GREEN_LED_PIN 10
+#define RED_LED_PIN 11
+
+// LCD: RS, E, D4, D5, D6, D7
+LiquidCrystal lcd(2, 3, 4, 5, 6, 9);
+
+const bool RELAY_ACTIVE_LOW = true;
+const unsigned long PI_TIMEOUT_MS = 2500;
+const unsigned long SENSOR_SEND_MS = 250;
+
+unsigned long lastPiMessageMs = 0;
+unsigned long lastSensorSendMs = 0;
+
+char serialBuffer[80];
+uint8_t serialIndex = 0;
+
+String lastLine1 = "";
+String lastLine2 = "";
+
+int readAverage(int pin) {
+  long total = 0;
+
+  analogRead(pin);
+  delayMicroseconds(300);
+
+  for (int i = 0; i < 5; i++) {
+    total += analogRead(pin);
+    delayMicroseconds(300);
+  }
+
+  return total / 5;
+}
+
+void relayOn() {
+  digitalWrite(RELAY_PIN, RELAY_ACTIVE_LOW ? LOW : HIGH);
+}
+
+void relayOff() {
+  digitalWrite(RELAY_PIN, RELAY_ACTIVE_LOW ? HIGH : LOW);
+}
+
+void setStartAllowed(bool allowed) {
+  if (allowed) {
+    relayOn();
+    digitalWrite(GREEN_LED_PIN, HIGH);
+    digitalWrite(RED_LED_PIN, LOW);
+  } else {
+    relayOff();
+    digitalWrite(GREEN_LED_PIN, LOW);
+    digitalWrite(RED_LED_PIN, HIGH);
+  }
+}
+
+String trim16(String text) {
+  if (text.length() > 16) {
+    return text.substring(0, 16);
+  }
+  return text;
+}
+
+void showLCD(String line1, String line2) {
+  line1 = trim16(line1);
+  line2 = trim16(line2);
+
+  if (line1 == lastLine1 && line2 == lastLine2) {
+    return;
+  }
+
+  lcd.clear();
+
+  lcd.setCursor(0, 0);
+  lcd.print(line1);
+
+  lcd.setCursor(0, 1);
+  lcd.print(line2);
+
+  lastLine1 = line1;
+  lastLine2 = line2;
+}
+
+void processCommand(char *command) {
+  lastPiMessageMs = millis();
+
+  if (strcmp(command, "PING") == 0) {
+    return;
+  }
+
+  if (strcmp(command, "START_ON") == 0) {
+    setStartAllowed(true);
+    return;
+  }
+
+  if (strcmp(command, "START_OFF") == 0) {
+    setStartAllowed(false);
+    return;
+  }
+
+  if (strncmp(command, "DISPLAY|", 8) == 0) {
+    char *payload = command + 8;
+    char *separator = strchr(payload, '|');
+
+    if (separator != NULL) {
+      *separator = '\0';
+
+      String line1 = String(payload);
+      String line2 = String(separator + 1);
+
+      showLCD(line1, line2);
+    }
+  }
+}
+
+void readSerialCommands() {
+  while (Serial.available() > 0) {
+    char c = Serial.read();
+
+    if (c == '\r') {
+      continue;
+    }
+
+    if (c == '\n') {
+      serialBuffer[serialIndex] = '\0';
+
+      if (serialIndex > 0) {
+        processCommand(serialBuffer);
+      }
+
+      serialIndex = 0;
+      continue;
+    }
+
+    if (serialIndex < sizeof(serialBuffer) - 1) {
+      serialBuffer[serialIndex++] = c;
+    }
+  }
+}
+
+void sendSensorData() {
+  int mq3 = readAverage(MQ3_PIN);
+  int fsr1 = readAverage(FSR1_PIN);
+  int fsr2 = readAverage(FSR2_PIN);
+  int fsr3 = readAverage(FSR3_PIN);
+  int fsr4 = readAverage(FSR4_PIN);
+
+  long total = (long)fsr1 + fsr2 + fsr3 + fsr4;
+
+  Serial.print("MQ3=");
+  Serial.print(mq3);
+
+  Serial.print(",FSR1=");
+  Serial.print(fsr1);
+
+  Serial.print(",FSR2=");
+  Serial.print(fsr2);
+
+  Serial.print(",FSR3=");
+  Serial.print(fsr3);
+
+  Serial.print(",FSR4=");
+  Serial.print(fsr4);
+
+  Serial.print(",TOTAL=");
+  Serial.println(total);
+}
+
+void setup() {
+  Serial.begin(115200);
+
+  pinMode(RELAY_PIN, OUTPUT);
+  pinMode(GREEN_LED_PIN, OUTPUT);
+  pinMode(RED_LED_PIN, OUTPUT);
+
+  lcd.begin(16, 2);
+
+  setStartAllowed(false);
+  showLCD("SMART SCOOTER", "WAITING FOR PI");
+
+  lastPiMessageMs = millis();
+}
+
+void loop() {
+  readSerialCommands();
+
+  unsigned long now = millis();
+
+  // Raspberry Pi 통신이 끊기면 안전하게 시동 차단
+  if (now - lastPiMessageMs > PI_TIMEOUT_MS) {
+    setStartAllowed(false);
+    showLCD("SYSTEM ERROR", "CHECK RPI");
+  }
+
+  if (now - lastSensorSendMs >= SENSOR_SEND_MS) {
+    lastSensorSendMs = now;
+    sendSensorData();
+  }
+}
